@@ -205,7 +205,10 @@ def _parse_byte_range(
 def create_video(
     background_tasks: BackgroundTasks, request: Request, body: TaskVideoRequest
 ):
-    return create_task(request, body, stop_at="video")
+    video_params = body.model_copy(
+        update={"video_source": "pexels", "voice_name": "es-ES-ElviraNeural"}
+    )
+    return create_task(request, video_params, stop_at="video")
 
 
 @router.post("/subtitle", response_model=TaskResponse, summary="Generate subtitle only")

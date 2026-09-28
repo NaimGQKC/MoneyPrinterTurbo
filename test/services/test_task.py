@@ -718,6 +718,22 @@ class TestTaskService(unittest.TestCase):
             match_script_order=True,
         )
 
+    def test_provided_script_uses_subject_for_terms_without_llm(self):
+        params = VideoParams(
+            video_script="A pre-written narration about forests.",
+            video_subject="forest landscape",
+        )
+
+        with (
+            patch.object(tm.llm, "generate_terms") as generate,
+            patch.object(tm.twelvelabs, "rerank_terms_by_subject") as rerank,
+        ):
+            result = tm.generate_terms("provided-script", params, params.video_script)
+
+        self.assertEqual(result, ["forest landscape"])
+        generate.assert_not_called()
+        rerank.assert_not_called()
+
     def test_start_stops_before_materials_when_term_provider_fails(self):
         """
         关键词 Provider 失败后，任务必须立即结束，不能继续生成音频或下载素材。

@@ -52,6 +52,12 @@ class TestVideoParams(unittest.TestCase):
         self.assertEqual(params.video_clip_duration, 1)
         self.assertEqual(params.video_count, 1)
 
+    def test_video_request_accepts_script_alias_without_subject(self):
+        params = VideoParams(script="A pre-written narration.")
+
+        self.assertEqual(params.video_script, "A pre-written narration.")
+        self.assertEqual(params.video_subject, "")
+
     def test_subtitle_modes_accept_only_supported_api_values(self):
         """新增字幕参数必须拒绝拼写错误，避免请求成功后静默降级。"""
         params = VideoParams(

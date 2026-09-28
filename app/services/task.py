@@ -314,15 +314,24 @@ def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
     if not video_terms:
-        # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
-        # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
-        # 无法改善“后面内容的画面提前出现”的问题。
-        video_terms = llm.generate_terms(
-            video_subject=params.video_subject,
-            video_script=utils.remove_pause_tags(video_script),
-            amount=8 if params.match_materials_to_script else 5,
-            match_script_order=params.match_materials_to_script,
-        )
+        if (params.video_script or "").strip():
+            # A caller-supplied script must be usable without any LLM credentials.
+            # Use its subject as the Pexels query, falling back to the first part
+            # of the narration when the caller only supplied script text.
+            search_term = (params.video_subject or "").strip()
+            if not search_term:
+                search_term = utils.remove_pause_tags(video_script).strip()[:120]
+            video_terms = [search_term] if search_term else []
+        else:
+            # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
+            # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
+            # 无法改善“后面内容的画面提前出现”的问题。
+            video_terms = llm.generate_terms(
+                video_subject=params.video_subject,
+                video_script=utils.remove_pause_tags(video_script),
+                amount=8 if params.match_materials_to_script else 5,
+                match_script_order=params.match_materials_to_script,
+            )
     else:
         if isinstance(video_terms, str):
             video_terms = [term.strip() for term in re.split(r"[,，]", video_terms)]
@@ -343,7 +352,8 @@ def generate_terms(task_id, params, video_script):
 
     # 可选的 TwelveLabs Marengo 语义重排：未启用时返回原顺序，无任何副作用。
     # 顺序匹配模式下关键词顺序本身就是脚本叙事顺序，必须保持原样，故跳过。
-    if not params.match_materials_to_script:
+    has_provided_script = bool((params.video_script or "").strip())
+    if not params.match_materials_to_script and not has_provided_script:
         video_terms = twelvelabs.rerank_terms_by_subject(
             video_subject=params.video_subject,
             search_terms=video_terms,

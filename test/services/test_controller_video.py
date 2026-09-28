@@ -183,6 +183,23 @@ class TestVideoControllerTasks(unittest.TestCase):
     def _request():
         return SimpleNamespace(headers={"x-task-id": "request-123"})
 
+    def test_create_video_pins_pexels_and_edge_voice(self):
+        body = TaskVideoRequest(
+            script="A pre-written narration.",
+            video_source="pixabay",
+            voice_name="different-voice",
+        )
+        with patch.object(
+            video_controller, "create_task", return_value={"ok": True}
+        ) as create_task:
+            result = video_controller.create_video(None, self._request(), body)
+
+        self.assertEqual(result, {"ok": True})
+        forwarded_body = create_task.call_args.args[1]
+        self.assertEqual(forwarded_body.video_script, "A pre-written narration.")
+        self.assertEqual(forwarded_body.video_source, "pexels")
+        self.assertEqual(forwarded_body.voice_name, "es-ES-ElviraNeural")
+
     def test_video_task_rejects_font_outside_font_directory_before_queueing(self):
         """非法字体路径必须在任务入队前返回 400，不产生付费后台任务。"""
         with tempfile.TemporaryDirectory() as temp_dir:
