@@ -1,13 +1,25 @@
 """Pedra listing-video controller.
 
-Exposes two endpoints:
-  POST /api/v1/pedra/videos   – start a video generation task (returns task_id immediately)
-  GET  /api/v1/pedra/tasks/{task_id} – poll status / get video_url when done
+Endpoints
+---------
+POST /api/v1/pedra/videos
+    Start a listing-video generation task. Returns {task_id} immediately.
+    Optional ``callback_url``: when the video is ready (or failed), Cloud Run
+    POSTs {task_id, state, video_url} to that URL — so GHL workflows don't
+    need to poll; they just wait for the inbound webhook.
 
-The Cloud Run container downloads listing photos server-side (bypassing the IP
-block that prevents Pedra from fetching fotos15.apinmo.com directly), converts
-them to base64 data-URIs, and calls the Pedra synchronous API in a background
-thread.  Pedra can take up to 10 minutes; callers should poll every 30-60 s.
+GET /api/v1/pedra/tasks/{task_id}
+    Poll task status. Returns {state, progress, video_url} when done.
+    state: 4=processing, 1=complete, -1=failed
+
+Design notes
+------------
+- Photos are downloaded server-side (base64 data-URI) to bypass the IP block
+  that prevents Pedra from fetching fotos15.apinmo.com directly.
+- Auto-discovery probes HEAD requests up to photo #150 and returns up to 10
+  valid photo numbers.
+- The Pedra API is synchronous and can take up to 10 minutes; it runs in a
+  daemon thread.
 """
 
 import base64
@@ -57,14 +69,16 @@ class PedraImageInput(BaseModel):
 class PedraVideoRequest(BaseModel):
     # Option A: caller supplies explicit photo URLs (fotos15 or any public URL)
     images: Optional[List[PedraImageInput]] = None
-    # Option B: supply property_id and we discover / download photos automatically
+    # Option B: property_id — we auto-discover and download photos
     property_id: Optional[str] = None
-    photo_numbers: Optional[List[int]] = None   # override auto-discovery
+    photo_numbers: Optional[List[int]] = None  # override auto-discovery
     # Branding
     ending_title: Optional[str] = "Nadia Rouchdi \u00b7 RE/MAX Confort"
     ending_subtitle: Optional[str] = "+34 649 605 404"
     property_characteristics: Optional[List[dict]] = None
     is_vertical: Optional[bool] = True
+    # Callback: if set, we POST {task_id, state, video_url, message} here when done
+    callback_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +86,7 @@ class PedraVideoRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _to_base64(url: str) -> str:
-    """Download an image URL and return a base64 data-URI."""
+    """Download an image and return a base64 data-URI string."""
     resp = req_lib.get(url, headers=_PHOTO_HEADERS, timeout=30, allow_redirects=True)
     resp.raise_for_status()
     ct = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
@@ -83,8 +97,8 @@ def _to_base64(url: str) -> str:
 def _discover_photos(property_id: str) -> List[int]:
     """Probe fotos15.apinmo.com HEAD requests to find valid photo numbers.
 
-    Returns up to 10 photo numbers.  Stops early after 12 consecutive misses
-    once at least 2 photos have been found.
+    Returns up to 10 photo numbers. Stops after 12 consecutive 404s once at
+    least 2 photos have been found.
     """
     base_url = f"{INMOVILLA_BASE}/{INMOVILLA_AGENCY}/{property_id}"
     found: List[int] = []
@@ -107,11 +121,20 @@ def _discover_photos(property_id: str) -> List[int]:
     return found
 
 
+def _fire_callback(callback_url: str, payload: dict) -> None:
+    """POST result payload to callback_url; swallow errors (best-effort)."""
+    try:
+        resp = req_lib.post(callback_url, json=payload, timeout=15)
+        logger.info(f"[pedra] callback {callback_url} → {resp.status_code}")
+    except Exception as exc:
+        logger.warning(f"[pedra] callback failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Background worker
 # ---------------------------------------------------------------------------
 
-def _run_pedra_task(task_id: str, req: PedraVideoRequest) -> None:
+def _run_pedra_task(task_id: str, req: PedraVideoRequest) -> None:  # noqa: C901
     try:
         sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
@@ -147,7 +170,7 @@ def _run_pedra_task(task_id: str, req: PedraVideoRequest) -> None:
         if len(images) < 2:
             raise ValueError(f"Only {len(images)} valid image(s) collected, need \u22652")
 
-        logger.info(f"[pedra:{task_id}] sending {len(images)} images to Pedra")
+        logger.info(f"[pedra:{task_id}] sending {len(images)} images to Pedra API")
         sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=35)
 
         body: dict = {
@@ -191,14 +214,28 @@ def _run_pedra_task(task_id: str, req: PedraVideoRequest) -> None:
         )
         logger.success(f"[pedra:{task_id}] done \u2192 {video_url}")
 
+        if req.callback_url:
+            _fire_callback(req.callback_url, {
+                "task_id": task_id,
+                "state": const.TASK_STATE_COMPLETE,
+                "video_url": video_url,
+            })
+
     except Exception as exc:
-        logger.error(f"[pedra:{task_id}] failed: {exc}")
+        err = str(exc)
+        logger.error(f"[pedra:{task_id}] failed: {err}")
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_FAILED,
             progress=0,
-            message=str(exc),
+            message=err,
         )
+        if req.callback_url:
+            _fire_callback(req.callback_url, {
+                "task_id": task_id,
+                "state": const.TASK_STATE_FAILED,
+                "message": err,
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +244,11 @@ def _run_pedra_task(task_id: str, req: PedraVideoRequest) -> None:
 
 @router.post("/pedra/videos", summary="Start Pedra listing-video generation")
 def create_pedra_video(request: Request, body: PedraVideoRequest):
+    """Kick off a Pedra video task. Returns task_id immediately.
+
+    Supply ``callback_url`` and Cloud Run will POST the finished video_url
+    back to that URL — no polling required from GHL workflows.
+    """
     request_id = base.get_task_id(request)
     task_id = utils.get_uuid()
 
@@ -236,6 +278,10 @@ def get_pedra_task(
     request: Request,
     task_id: str = Path(..., description="task_id from POST /pedra/videos"),
 ):
+    """Returns {state, progress, video_url} for a Pedra task.
+
+    state: 4=processing  1=complete  -1=failed
+    """
     request_id = base.get_task_id(request)
     task = sm.state.get_task(task_id)
     if task:
