@@ -4,11 +4,10 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - "README*.md"
-      - "docs/**"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/docker-ghcr.yml"
-      - ".github/workflows/deploy-cloud-run.yml"
+      - 'README*.md'
+      - 'docs/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/docker-ghcr.yml'
 
 jobs:
   deploy:

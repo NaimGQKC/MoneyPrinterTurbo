@@ -1,0 +1,32 @@
+# Cloud Build config used by `gcloud run deploy --source .`
+# Builds Dockerfile.cloudrun (FastAPI API server) instead of the default
+# Dockerfile (Streamlit web UI).
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -f
+      - Dockerfile.cloudrun
+      - -t
+      - '$_AR_HOSTNAME/$_PROJECT_ID/cloud-run-source-deploy/$_SERVICE_NAME:$COMMIT_SHA'
+      - .
+    env:
+      - 'DOCKER_BUILDKIT=1'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '$_AR_HOSTNAME/$_PROJECT_ID/cloud-run-source-deploy/$_SERVICE_NAME:$COMMIT_SHA'
+
+images:
+  - '$_AR_HOSTNAME/$_PROJECT_ID/cloud-run-source-deploy/$_SERVICE_NAME:$COMMIT_SHA'
+
+substitutions:
+  _AR_HOSTNAME: europe-west1-docker.pkg.dev
+  _PROJECT_ID: instant-guard-510114-p5
+  _SERVICE_NAME: mpt-app
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
