@@ -1,0 +1,41 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README*.md"
+      - "docs/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/docker-ghcr.yml"
+      - ".github/workflows/deploy-cloud-run.yml"
+
+jobs:
+  deploy:
+    name: Build & deploy mpt-app
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy mpt-app \
+            --source . \
+            --region europe-west1 \
+            --no-cpu-throttling \
+            --cpu 4 \
+            --memory 8Gi \
+            --max-instances 1 \
+            --project instant-guard-510114-p5 \
+            --quiet
