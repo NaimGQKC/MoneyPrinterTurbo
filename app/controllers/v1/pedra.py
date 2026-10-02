@@ -202,7 +202,7 @@ def _run_pedra_task(task_id: str, req: PedraVideoRequest) -> None:  # noqa: C901
         elif isinstance(out, list) and out:
             video_url = out[0]
         if not video_url:
-            video_url = data.get("video_url") or data.get("url")
+            video_url = data.get("videoUrl") or data.get("video_url") or data.get("url")
         if not video_url:
             raise ValueError(f"No video URL in Pedra response: {str(data)[:400]}")
 
