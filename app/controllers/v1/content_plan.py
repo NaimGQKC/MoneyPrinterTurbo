@@ -3,12 +3,13 @@
 Endpoint
 --------
 POST /api/v1/content-plan
-    Receives the weekly JSON content plan from the Content Strategist
-    (via GHL workflow AI Agent step) and distributes to each stream:
-      - MPT  : submits faceless reel scripts to the local /api/v1/videos endpoint
-      - HeyGen: returns the formatted avatar script so the GHL workflow can email it
-      - Pedra : returns the chosen listing_reference so the GHL workflow can tag the contact
-      - Blog  : returns full draft text + brief for Nadia to review before publishing
+    Two modes:
+    1. Distribute mode: receives a full Content Strategist JSON plan and
+       distributes to each stream (MPT, HeyGen email, Pedra ref, blog draft).
+    2. Generate mode: called with {"generate": true} from the GHL Saturday
+       workflow trigger. Returns a minimal acknowledgement so the workflow
+       email step fires. The actual content generation happens via the
+       Ask AI Saturday scheduled task (which runs the Content Strategist).
 
 The endpoint returns a flat JSON object so GHL workflow steps can
 reference individual fields directly (e.g. {{response.heygen_script}}).
@@ -24,20 +25,15 @@ from fastapi import APIRouter, HTTPException, Request
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-_SELF_BASE = "http://localhost:8080"          # internal self-call for MPT
+_SELF_BASE = "http://localhost:8080"
 _MPT_API_KEY = os.environ.get("MPT_API_KEY", "nadia-mpt-2026")
 _MPT_VOICE = "es-ES-ElviraNeural"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _extract_plan(body: dict) -> dict:
-    """Accept plan as nested dict or as a JSON string under 'plan' key."""
+def _extract_plan(body: dict) -> dict | None:
+    """Return the plan dict, or None if this is a generate-mode trigger."""
+    if body.get("generate"):
+        return None
     raw = body.get("plan", body)
     if isinstance(raw, str):
         try:
@@ -48,31 +44,24 @@ def _extract_plan(body: dict) -> dict:
 
 
 async def _submit_mpt(script: str, title: str) -> dict:
-    """Fire a reel task to the MPT endpoint and return task_id or error."""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 f"{_SELF_BASE}/api/v1/videos",
                 headers={"x-api-key": _MPT_API_KEY, "Content-Type": "application/json"},
-                json={
-                    "video_subject": title,
-                    "video_script": script,
-                    "voice_name": _MPT_VOICE,
-                },
+                json={"video_subject": title, "video_script": script, "voice_name": _MPT_VOICE},
             )
         data = resp.json()
         return {"status": "submitted", "task_id": data.get("task_id", ""), "title": title}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("MPT submit failed for '%s'", title)
         return {"status": "error", "detail": str(exc), "title": title}
 
 
 def _format_heygen_email(item: dict) -> str:
-    """Return a plain-text HeyGen script block ready to paste into HeyGen."""
     brief = item.get("creative_brief", {})
     prod = item.get("production_instructions", {})
     dist = item.get("distribution_notes", {})
-
     lines = [
         f"SCRIPT HEYGEN -- {item.get('title', '')}",
         "",
@@ -101,12 +90,10 @@ def _format_heygen_email(item: dict) -> str:
 
 
 def _format_blog_draft(item: dict) -> str:
-    """Return the full blog draft text for Nadia to review."""
     prod = item.get("production_instructions", {})
     brief = item.get("creative_brief", {})
     dist = item.get("distribution_notes", {})
     seo = dist.get("seo", {})
-
     lines = [
         f"TITULO: {item.get('title', '')}",
         f"URL SLUG: {seo.get('url_slug', '')}",
@@ -119,34 +106,40 @@ def _format_blog_draft(item: dict) -> str:
         "-- CTA --",
         brief.get("cta", ""),
         "",
-        "NOTA: Revisa y aprueba antes de publicar. Puedes anadir casos reales o ajustar datos.",
+        "NOTA: Revisa y aprueba antes de publicar.",
     ]
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Main endpoint
-# ---------------------------------------------------------------------------
-
 @router.post("/api/v1/content-plan")
 async def execute_content_plan(request: Request):
     """
-    Receive the Content Strategist JSON plan and distribute to each stream.
+    Distribute a content plan to all streams, or acknowledge a generate trigger.
 
-    Returns a flat dict so GHL workflow output-variable mapping works:
-      - heygen_script     : formatted script text (for email action in workflow)
-      - heygen_title      : short title
-      - pedra_listing_ref : listing reference number (for GHL tag action)
-      - mpt_tasks         : list of {task_id, title} for submitted reels
-      - blog_title        : blog post title
-      - blog_brief        : structured brief (angle, problem, hook, word count)
-      - blog_draft        : FULL blog post text ready for Nadia to review
-      - week              : ISO week start date
-      - data_gaps         : comma-separated data gaps from planner
-      - sources           : list of source URLs cited in the plan
+    Returns flat dict:
+      heygen_script, heygen_title, pedra_listing_ref, mpt_tasks,
+      blog_title, blog_brief, blog_draft, week, data_gaps, sources
     """
     body = await request.json()
     plan = _extract_plan(body)
+
+    # Generate-mode: GHL workflow just fired the trigger, no plan yet.
+    # Return a prompt for the email so Nadia knows the engine ran.
+    if plan is None:
+        logger.info("Generate-mode trigger received from GHL workflow")
+        return {
+            "heygen_script": "Motor de contenidos activado. El plan semanal completo llega por el flujo del sabado a las 9:00 AM.",
+            "heygen_title": "Activacion Motor de Contenidos",
+            "pedra_listing_ref": "",
+            "mpt_tasks": [],
+            "blog_title": "",
+            "blog_brief": "",
+            "blog_draft": "",
+            "week": "",
+            "data_gaps": "",
+            "sources": [],
+            "mode": "generate_trigger",
+        }
 
     result: dict = {
         "heygen_script": "",
@@ -162,20 +155,16 @@ async def execute_content_plan(request: Request):
     }
 
     mpt_tasks = []
-
     for item in plan.get("content_plan", []):
         fmt = item.get("format", "")
-
         if fmt == "nadia_avatar_video_heygen":
             result["heygen_title"] = item.get("title", "")
             result["heygen_script"] = _format_heygen_email(item)
-
         elif fmt == "faceless_educational_reel_mpt":
             script = item.get("production_instructions", {}).get("script_direction", "")
             title = item.get("title", "Reel")
             task = await _submit_mpt(script, title)
             mpt_tasks.append(task)
-
         elif fmt == "property_listing_video_pedra":
             listings = (
                 plan.get("inputs_reviewed", {})
@@ -186,7 +175,6 @@ async def execute_content_plan(request: Request):
                 result["pedra_listing_ref"] = str(listings[0].get("listing_reference", ""))
             if not result["pedra_listing_ref"]:
                 result["pedra_listing_ref"] = str(item.get("local_zaragoza_hook", ""))
-
         elif fmt == "blog_post":
             prod = item.get("production_instructions", {})
             result["blog_title"] = item.get("title", "")
