@@ -8,7 +8,7 @@ POST /api/v1/content-plan
       - MPT  : submits faceless reel scripts to the local /api/v1/videos endpoint
       - HeyGen: returns the formatted avatar script so the GHL workflow can email it
       - Pedra : returns the chosen listing_reference so the GHL workflow can tag the contact
-      - Blog  : placeholder (GHL blog agent called from workflow side)
+      - Blog  : returns full draft text + brief for Nadia to review before publishing
 
 The endpoint returns a flat JSON object so GHL workflow steps can
 reference individual fields directly (e.g. {{response.heygen_script}}).
@@ -68,7 +68,7 @@ async def _submit_mpt(script: str, title: str) -> dict:
 
 
 def _format_heygen_email(item: dict) -> str:
-    """Return a plain-text HeyGen script block ready to paste into an email body."""
+    """Return a plain-text HeyGen script block ready to paste into HeyGen."""
     brief = item.get("creative_brief", {})
     prod = item.get("production_instructions", {})
     dist = item.get("distribution_notes", {})
@@ -100,6 +100,30 @@ def _format_heygen_email(item: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_blog_draft(item: dict) -> str:
+    """Return the full blog draft text for Nadia to review."""
+    prod = item.get("production_instructions", {})
+    brief = item.get("creative_brief", {})
+    dist = item.get("distribution_notes", {})
+    seo = dist.get("seo", {})
+
+    lines = [
+        f"TITULO: {item.get('title', '')}",
+        f"URL SLUG: {seo.get('url_slug', '')}",
+        f"META DESCRIPTION: {seo.get('meta_description', '')}",
+        f"KEYWORD PRINCIPAL: {seo.get('primary_keyword', '')}",
+        "",
+        "-- BORRADOR COMPLETO --",
+        prod.get("script_direction", prod.get("content", "")),
+        "",
+        "-- CTA --",
+        brief.get("cta", ""),
+        "",
+        "NOTA: Revisa y aprueba antes de publicar. Puedes anadir casos reales o ajustar datos.",
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Main endpoint
 # ---------------------------------------------------------------------------
@@ -110,14 +134,16 @@ async def execute_content_plan(request: Request):
     Receive the Content Strategist JSON plan and distribute to each stream.
 
     Returns a flat dict so GHL workflow output-variable mapping works:
-      - heygen_script   : formatted script text (for email action in workflow)
-      - heygen_title    : short title
+      - heygen_script     : formatted script text (for email action in workflow)
+      - heygen_title      : short title
       - pedra_listing_ref : listing reference number (for GHL tag action)
-      - mpt_tasks       : list of {task_id, title} for submitted reels
-      - blog_title      : blog post title
-      - blog_brief      : full blog production instructions
-      - week            : ISO week start date
-      - data_gaps       : comma-separated data gaps from planner
+      - mpt_tasks         : list of {task_id, title} for submitted reels
+      - blog_title        : blog post title
+      - blog_brief        : structured brief (angle, problem, hook, word count)
+      - blog_draft        : FULL blog post text ready for Nadia to review
+      - week              : ISO week start date
+      - data_gaps         : comma-separated data gaps from planner
+      - sources           : list of source URLs cited in the plan
     """
     body = await request.json()
     plan = _extract_plan(body)
@@ -129,8 +155,10 @@ async def execute_content_plan(request: Request):
         "mpt_tasks": [],
         "blog_title": "",
         "blog_brief": "",
+        "blog_draft": "",
         "week": plan.get("week", {}).get("start_date", ""),
         "data_gaps": ", ".join(plan.get("data_gaps", [])),
+        "sources": plan.get("sources", []),
     }
 
     mpt_tasks = []
@@ -155,9 +183,9 @@ async def execute_content_plan(request: Request):
                 .get("priority_listings", [])
             )
             if listings:
-                result["pedra_listing_ref"] = listings[0].get("listing_reference", "")
+                result["pedra_listing_ref"] = str(listings[0].get("listing_reference", ""))
             if not result["pedra_listing_ref"]:
-                result["pedra_listing_ref"] = item.get("local_zaragoza_hook", "")
+                result["pedra_listing_ref"] = str(item.get("local_zaragoza_hook", ""))
 
         elif fmt == "blog_post":
             prod = item.get("production_instructions", {})
@@ -167,10 +195,10 @@ async def execute_content_plan(request: Request):
                 f"Angulo: {item.get('core_angle', '')}\n"
                 f"Problema del vendedor: {item.get('seller_problem_addressed', '')}\n"
                 f"Hook local: {item.get('local_zaragoza_hook', '')}\n"
-                f"Instrucciones: {prod.get('script_direction', '')}\n"
                 f"CTA: {item.get('creative_brief', {}).get('cta', '')}\n"
                 f"Palabras: {prod.get('length_or_word_count', '800-1200')}"
             )
+            result["blog_draft"] = _format_blog_draft(item)
 
     result["mpt_tasks"] = mpt_tasks
     return result
