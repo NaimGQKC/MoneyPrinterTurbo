@@ -1,7 +1,6 @@
 # Cloud Run API server image.
 # Starts the FastAPI/uvicorn server on port 8080 (the Cloud Run default).
-# Used by cloudbuild.yaml so that `gcloud run deploy --source .` deploys the
-# API — not the Streamlit web UI that the main Dockerfile serves.
+# No system packages needed — Pedra and content_plan only use Python requests/httpx.
 
 FROM python:3.11-slim-bullseye
 
@@ -9,13 +8,6 @@ WORKDIR /MoneyPrinterTurbo
 RUN chmod 777 /MoneyPrinterTurbo
 
 ENV PYTHONPATH="/MoneyPrinterTurbo"
-
-# System dependencies — use official Debian mirrors (Cloud Build runs on Google
-# infrastructure where China mirrors are slow / unreliable).
-RUN set -eu; \
-    apt-get update && \
-    apt-get install -y --no-install-recommends git ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first so Docker cache is reused on code-only changes.
 COPY requirements.txt ./
@@ -29,7 +21,6 @@ COPY . .
 RUN cp config.example.toml config.toml
 
 # Cloud Run routes external traffic to $PORT (default 8080).
-# config.example.toml already sets listen_host = "0.0.0.0" and listen_port = 8080.
 EXPOSE 8080
 
 CMD ["python", "main.py"]
