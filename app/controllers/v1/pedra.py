@@ -16,8 +16,8 @@ Design notes
 ------------
 - Photos are downloaded server-side (base64 data-URI) to bypass the IP block
   that prevents Pedra from fetching fotos15.apinmo.com directly.
-- Auto-discovery probes HEAD requests up to photo #150 and returns up to 10
-  valid photo numbers.
+- Auto-discovery uses GET+Range (first byte) instead of HEAD because
+  fotos15.apinmo.com returns inconsistent status codes for HEAD requests.
 - The Pedra API is synchronous and can take up to 10 minutes; it runs in a
   daemon thread.
 """
@@ -95,19 +95,26 @@ def _to_base64(url: str) -> str:
 
 
 def _discover_photos(property_id: str) -> List[int]:
-    """Probe fotos15.apinmo.com HEAD requests to find valid photo numbers.
+    """Probe fotos15.apinmo.com to find valid photo numbers.
 
-    Returns up to 10 photo numbers. Stops after 12 consecutive 404s once at
-    least 2 photos have been found.
+    Uses GET with Range header (first byte only) instead of HEAD because
+    fotos15.apinmo.com returns inconsistent status codes for HEAD requests.
+    Returns up to 10 photo numbers. Scans 1-150; stops after 20 consecutive
+    misses once at least 2 photos have been found.
     """
     base_url = f"{INMOVILLA_BASE}/{INMOVILLA_AGENCY}/{property_id}"
+    range_headers = {**_PHOTO_HEADERS, "Range": "bytes=0-0"}
     found: List[int] = []
     consec = 0
-    for n in range(1, 150):
+    for n in range(1, 151):
         url = f"{base_url}/{n}-1.jpg"
         try:
-            r = req_lib.head(url, headers=_PHOTO_HEADERS, timeout=4, allow_redirects=True)
-            if r.status_code == 200:
+            r = req_lib.get(
+                url, headers=range_headers, timeout=5,
+                allow_redirects=True, stream=True,
+            )
+            r.close()
+            if r.status_code in (200, 206):
                 found.append(n)
                 consec = 0
                 if len(found) >= 10:
@@ -116,7 +123,7 @@ def _discover_photos(property_id: str) -> List[int]:
                 consec += 1
         except Exception:
             consec += 1
-        if consec >= 12 and len(found) >= 2:
+        if consec >= 20 and len(found) >= 2:
             break
     return found
 
@@ -125,7 +132,7 @@ def _fire_callback(callback_url: str, payload: dict) -> None:
     """POST result payload to callback_url; swallow errors (best-effort)."""
     try:
         resp = req_lib.post(callback_url, json=payload, timeout=15)
-        logger.info(f"[pedra] callback {callback_url} → {resp.status_code}")
+        logger.info(f"[pedra] callback {callback_url} \u2192 {resp.status_code}")
     except Exception as exc:
         logger.warning(f"[pedra] callback failed: {exc}")
 
